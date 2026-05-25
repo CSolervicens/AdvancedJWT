@@ -1,0 +1,6 @@
+dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer
+dotnet add package System.IdentityModel.Tokens.Jwt
+dotnet add package Konscious.Security.Cryptography.Argon2
+
+openssl genrsa -out private.pem 4096
+openssl rsa -in private.pem -pubout -out public.pem
