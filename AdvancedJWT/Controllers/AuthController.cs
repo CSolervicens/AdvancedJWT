@@ -13,20 +13,23 @@ public class AuthController : ControllerBase
     private readonly JwtService _jwtService;
     private readonly DeviceFingerprintService _fingerprintService;
     private readonly CsrfService _csrfService;
+    private readonly IConfiguration _config;
 
     public AuthController(
         IAuthDataService dataService,
         PasswordService passwordService,
         JwtService jwtService,
         DeviceFingerprintService fingerprintService,
-        CsrfService csrfService)
+        CsrfService csrfService,
+        IConfiguration config)
     {
         _dataService = dataService;
         _passwordService = passwordService;
         _jwtService = jwtService;
         _fingerprintService = fingerprintService;
         _csrfService = csrfService;
-    }
+        _config = config;
+}
 
     [HttpPost("login")]
     public async Task<IActionResult> Login(LoginRequest request)
@@ -46,31 +49,59 @@ public class AuthController : ControllerBase
         var (accessToken, jti) = _jwtService.GenerateAccessToken(user);
 
         var refreshToken = TokenGenerator.GenerateSecureToken();
+        var refreshTokenHash = TokenGenerator.Sha256(refreshToken);
 
-        Console.WriteLine($"accessToken: {accessToken}");
-        Console.WriteLine($"refreshToken: {refreshToken}");
+        double RefreshToken_Minutes = double.Parse(_config["Jwt:RefreshToken_Minutes"]);
+        Console.WriteLine($"RefreshToken_Minutes: {RefreshToken_Minutes}");
 
-        await _dataService.AddRefreshTokenAsync(new RefreshToken
+        var fingerprint = _fingerprintService.Generate(
+            Request,
+            Request.Headers["X-Device-Entropy"]
+        );
+
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (string.IsNullOrEmpty(ipAddress))
         {
-            UserId = user.Id,
-            TokenHash = TokenGenerator.Sha256(refreshToken),
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
-            CreatedAt = DateTime.UtcNow
-        });
+            ipAddress = "unknown";
+        }
 
+        var userAgent = Request.Headers.UserAgent.ToString();
+        if (string.IsNullOrEmpty(userAgent))
+        {
+            userAgent = "unknown";
+        }
+
+        var userSession = new UserSession
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            DeviceFingerprint = fingerprint,
+            RefreshTokenHash = refreshTokenHash,
+            JwtId = jti,
+            CreatedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(RefreshToken_Minutes),
+            IpAddress = ipAddress,
+            UserAgent = userAgent
+        };
+
+        await _dataService.AddUserSessionAsync(userSession);
         await _dataService.SaveChangesAsync();
 
         SetRefreshCookie(refreshToken);
 
         return Ok(new
         {
-            accessToken
+            accessToken,
+            csrfToken = _csrfService.Generate()
         });
     }
 
 
     private void SetRefreshCookie(string token)
     {
+        double RefreshToken_Minutes = double.Parse(_config["Jwt:RefreshToken_Minutes"]);
+        Console.WriteLine($"RefreshToken_Minutes: {RefreshToken_Minutes}");
+
         Response.Cookies.Append(
             "refreshToken",
             token,
@@ -79,7 +110,7 @@ public class AuthController : ControllerBase
                 HttpOnly = true,
                 Secure = true,
                 SameSite = SameSiteMode.Strict,
-                Expires = DateTimeOffset.UtcNow.AddDays(7)
+                Expires = DateTimeOffset.UtcNow.AddMinutes(RefreshToken_Minutes)
             });
     }
 
@@ -135,6 +166,9 @@ public class AuthController : ControllerBase
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh()
     {
+        
+        Console.WriteLine("Refresh endpoint called");
+
         var refreshToken =
             Request.Cookies["refreshToken"];
 
@@ -146,11 +180,15 @@ public class AuthController : ControllerBase
         var session = await _dataService.GetUserSessionByRefreshTokenHashAsync(hash);
 
         if (session == null)
+        {
+            Console.WriteLine("No session found for the provided refresh token hash");
             return Unauthorized();
+        }
 
         if (session.RevokedAt != null)
         {
             // replay attack detected
+            Console.WriteLine("Replay attack detected: refresh token has already been revoked");
 
             await _dataService.RevokeAllUserSessionsAsync(session.UserId);
 
@@ -158,7 +196,10 @@ public class AuthController : ControllerBase
         }
 
         if (session.ExpiresAt < DateTime.UtcNow)
+        {
+            Console.WriteLine("Refresh token has expired");
             return Unauthorized();
+        }
 
         var fingerprint =
             _fingerprintService.Generate(
@@ -168,6 +209,7 @@ public class AuthController : ControllerBase
 
         if (fingerprint != session.DeviceFingerprint)
         {
+            Console.WriteLine("Device fingerprint mismatch detected");
             await _dataService.RevokeAllUserSessionsAsync(session.UserId);
 
             return Unauthorized();
@@ -185,14 +227,32 @@ public class AuthController : ControllerBase
         var (jwt, jti) =
             _jwtService.GenerateAccessToken(session.User);
 
+        double RefreshToken_Minutes = double.Parse(_config["Jwt:RefreshToken_Minutes"]);
+        Console.WriteLine($"RefreshToken_Minutes: {RefreshToken_Minutes}");
+
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (string.IsNullOrEmpty(ipAddress))
+        {
+            ipAddress = "unknown";
+        }
+
+        var userAgent = Request.Headers.UserAgent.ToString();
+        if (string.IsNullOrEmpty(userAgent))
+        {
+            userAgent = "unknown";
+        }
+
         var newSession = new UserSession
         {
+            Id = Guid.NewGuid(),
             UserId = session.UserId,
             DeviceFingerprint = session.DeviceFingerprint,
             RefreshTokenHash = newHash,
             JwtId = jti,
             CreatedAt = DateTime.UtcNow,
-            ExpiresAt = DateTime.UtcNow.AddDays(7)
+            ExpiresAt = DateTime.UtcNow.AddMinutes(RefreshToken_Minutes),
+            IpAddress = ipAddress,
+            UserAgent = userAgent
         };
 
         session.ReplacedByTokenHash = newHash;
@@ -203,6 +263,8 @@ public class AuthController : ControllerBase
         await _dataService.SaveChangesAsync();
 
         SetRefreshCookie(newRefresh);
+
+        Console.WriteLine($"** New access token generated !!");
 
         return Ok(new
         {

@@ -31,11 +31,13 @@ public class JwtService
             SecurityAlgorithms.RsaSha256
         );
 
+        double AccessTokenMinutes = double.Parse(_config["Jwt:AccessTokenMinutes"]);
+        
         var token = new JwtSecurityToken(
             issuer: _config["Jwt:Issuer"],
             audience: _config["Jwt:Audience"],
             claims: claims,
-            expires: DateTime.UtcNow.AddMinutes(10),
+            expires: DateTime.UtcNow.AddMinutes(AccessTokenMinutes),
             signingCredentials: credentials
         );
 

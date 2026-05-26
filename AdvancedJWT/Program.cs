@@ -1,12 +1,20 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
+using Microsoft.EntityFrameworkCore;
+using AdvancedJWT.Data;
+using AdvancedJWT.Services;
 
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Add DbContext with SQLite
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection") 
+        ?? "Data Source=AdvancedJWT.db"));
+
 builder.Services.AddSingleton<RsaKeyService>();
-builder.Services.AddScoped<IAuthDataService, MockAuthDataService>();
+builder.Services.AddScoped<IAuthDataService, SqliteAuthDataService>();
 builder.Services.AddScoped<PasswordService>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<DeviceFingerprintService>();
@@ -103,6 +111,33 @@ builder.Services
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
+// Initialize database and seed data
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var passwordService = scope.ServiceProvider.GetRequiredService<PasswordService>();
+
+    // Create database if it doesn't exist
+    context.Database.EnsureCreated();
+
+    // Seed test user if no users exist
+    if (!context.Users.Any())
+    {
+        var testUser = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            PasswordHash = passwordService.HashPassword("Test123!"),
+            Role = "User"
+        };
+
+        context.Users.Add(testUser);
+        context.SaveChanges();
+
+        Console.WriteLine("Database seeded with test user: test@example.com / Test123!");
+    }
+}
 
 if (app.Environment.IsDevelopment())
 {
